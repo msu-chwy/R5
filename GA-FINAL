@@ -35,7 +35,7 @@ SELECT
     page_title,
     --first_value(referer) ignore nulls over (partition BY ga_sessions_date, unique_visit_id ORDER BY hit_timestamp) referer,
     --first_value(personalization_id) ignore nulls over (partition BY ga_sessions_date, unique_visit_id ORDER BY hit_timestamp) personalization_id,
-    convert_timezone('UTC', 'America/New_York', hit_timestamp) AS timestamp,
+    convert_timezone('UTC', 'America/New_York', hit_timestamp) AS timestamp, -- set timezone as EST
     --convert_timezone('UTC', 'America/Chicago', hit_timestamp) AS timestamp,
     --hit_timestamp AS timestamp,
     case
@@ -238,14 +238,6 @@ SELECT
 FROM ecom_sandbox.sfw_r5_sessions_final a, ecom_sandbox.sfw_r5_sessions_final b
 WHERE a.unique_visit_id=b.unique_visit_id AND timediff(second, a.timestamp, b.timestamp) <= 10 --sign-in success events that had sign-in clicks within 10 seconds
 GROUP BY 1,2,3,4,5,6;
-
-select event_category, event_action, event_label, unique_visit_id, hit_number,timestamp
-from ecom_sandbox.sfw_r5_sessions_final 
-where unique_visit_id in
-(select distinct unique_visit_id from ecom_sandbox.sfw_r5_sessions_final a
-where event_category='authenticate' AND a.event_action='sign-in' AND a.event_label = 'success')
-order by 4,5;
-
 
 -- calculate funnel
 create or replace local temp table ecom_sandbox.sfw_r5_funnel_steps on commit preserve rows as
