@@ -139,7 +139,7 @@ SELECT
     SUM(DISTINCT CASE WHEN event_action='purchase' and event_category='eec' and transaction_id IS NOT NULL THEN transaction_revenue ELSE 0 END) AS transaction_revenue,
     SUM(DISTINCT CASE WHEN event_action='purchase' and event_category='eec' and transaction_id IS NOT NULL THEN transaction_units ELSE 0 END) AS transaction_quantity,
     --sign-in metrics
-    COUNT(DISTINCT CASE WHEN AUTHENTICATION_STATE IN ('authenticated','fully-authenticated') THEN unique_visit_id END) AS Authenticated_sessions,
+    COUNT(DISTINCT CASE WHEN AUTHENTICATION_STATE = 'fully-authenticated' THEN unique_visit_id END) AS Authenticated_sessions,
     COUNT(DISTINCT CASE WHEN event_category='authenticate' AND event_action='sign-in' AND event_label = 'view' THEN unique_hit_id END) AS sign_in_page_impressions,
     COUNT(DISTINCT CASE WHEN event_category='authenticate' AND event_action='sign-in' AND event_label = 'view' THEN unique_visit_id END) AS sign_in_page_sessions,
     COUNT(DISTINCT CASE WHEN event_category='authenticate' AND event_action='sign-in' AND event_label = 'submit' THEN unique_hit_id END) AS sign_in_clicks,
