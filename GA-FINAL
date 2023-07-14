@@ -384,3 +384,5 @@ select a.*, b.atc_success_sessions, c.sign_in_success_sessions_with_signin_butto
   and a.new_customer_flag=e.new_customer_flag
   ) as final
 ;
+
+commit;
