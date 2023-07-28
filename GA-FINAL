@@ -1,4 +1,4 @@
-set (datadate, op_date)  = ((select max(ga_sessions_date) from ga.ga_sessions where ga_sessions_date >= '2023-07-12' and load_type = 'daily'), (select max(ga_sessions_date) from ECOM_SANDBOX.sfw_R5_GA));
+set (datadate, op_date)  = (CURRENT_DATE() -1, (select max(ga_sessions_date) from ECOM_SANDBOX.sfw_R5_GA));
 
 -- Collect data from GA.SESSIONS_HIT table
 CREATE OR REPLACE LOCAL TEMP TABLE ecom_sandbox.sfw_r5_sessions_pre ON COMMIT PRESERVE ROWS AS
@@ -39,7 +39,6 @@ SELECT
     --CASE WHEN page_hostname like 'auth%.chewy.com' THEN 'R5' else 'Legacy' end as variation
 FROM ga.ga_sessions_hits 
 WHERE ga_sessions_date > $op_date and ga_sessions_date <= $datadate
---AND timestamp BETWEEN '2023-06-30 12:00:00' AND '2023-06-30 13:00:00'
 AND dataset='web'
 AND NOT is_bot
 and load_type = 'daily'
