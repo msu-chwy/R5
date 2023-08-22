@@ -93,11 +93,11 @@ select
 from
     ecom_sandbox.sfw_r5_sessions_pre as a
     inner join ecom_sandbox.sfw_r5_activation_sessions as b on a.unique_visit_id = b.unique_visit_id;
-   and timediff(
+/*   and timediff(
         millisecond,
         a.hit_timestamp,
         b.hit_timestamp
-    ) < 1000;
+    ) < 1000;*/
 
 --Separate Legacy, R5, Spillover based on app_version and login_page
 CREATE OR REPLACE LOCAL TEMP TABLE ecom_sandbox.sfw_r5_sessions_final ON COMMIT PRESERVE ROWS AS
@@ -199,3 +199,40 @@ FROM ecom_sandbox.sfw_r5_sessions_final
 WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.checkout_without_purchase_sessions) 
 AND event_category='authenticate' AND event_action='forgot-password' AND event_label = 'submit'
 GROUP BY 1;
+
+--calculate atc success rate and cart abandonment rate
+select variation,
+    COUNT(DISTINCT CASE WHEN event_category = 'eec' AND event_action = 'addToCart' THEN unique_visit_id END) AS atc_sessions,
+    COUNT(DISTINCT CASE WHEN event_category = 'eec' AND event_action = 'checkout' AND event_label = 'checkout'  THEN unique_visit_id END) AS checkout_sessions,
+    COUNT(DISTINCT CASE WHEN event_action='purchase' and event_category='eec' and transaction_id IS NOT NULL THEN unique_visit_id END) AS purchase_sessions
+from ecom_sandbox.sfw_r5_sessions_final
+group by 1;
+
+create or replace local temp table ecom_sandbox.sfw_r5_funnel_steps on commit preserve rows as
+select
+    unique_visit_id,
+    variation,
+    funnel_step
+from ecom_sandbox.sfw_r5_sessions_final
+         match_recognize (
+                          partition by unique_visit_id
+        order by hit_number
+      MEASURES classifier as funnel_step
+      all rows per match
+      PATTERN({- ATC -} {- sessions* -} checkout+)
+      DEFINE
+      Browse as event_category = 'eec' AND event_action = 'impression' AND event_label IN ('browse','search-results','deals','brand-page','campaign'),
+                          PDP as event_category = 'eec'AND event_action = 'detail' AND event_label IN ('In Stock','Out of Stock') AND ecommerce_action_type = '2',
+                          ATC as event_category ='eec' AND event_action = 'addToCart',
+                          sessions as unique_hit_id is not null,
+                          checkout as event_category = 'eec' and event_action = 'checkout' and event_label = 'checkout',
+                          Purchase as event_category = 'eec' AND event_action = 'purchase' and transaction_id is not NULL
+        )
+where funnel_step = 'CHECKOUT';
+
+
+select
+    variation,
+    count(distinct case when funnel_step='CHECKOUT' then  UNIQUE_VISIT_ID  end)  atc_success_sessions
+from ecom_sandbox.sfw_r5_funnel_steps
+group by 1;
