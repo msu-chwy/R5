@@ -1,0 +1,201 @@
+-- abandon cart
+-- pw reset request 
+--session_id, customer_id
+--both trestment and control
+-- 8/17-8/21
+
+--for those cart abandon
+-- % pw reset
+-- % pw attempt
+
+-- de: # of cart abandon
+-- nu: # of sessions that have pw reset request
+
+--session_id
+--both trestment and control
+-- 8/17-8/21
+
+--set (datadate, op_date)  = (CURRENT_DATE() -1, (select max(ga_sessions_date) from ECOM_SANDBOX.sfw_R5_GA));
+
+-- Collect data from GA.SESSIONS_HIT table
+CREATE OR REPLACE LOCAL TEMP TABLE ecom_sandbox.sfw_r5_sessions_pre ON COMMIT PRESERVE ROWS AS
+SELECT
+    unique_visit_id,
+    hit_custom_attributes:login_page as login_page,
+    hit_custom_attributes:app_version as app_version,
+    hit_number,
+    hit_timestamp,
+    unique_hit_id,
+    device_category,
+    channel_grouping channel,
+    new_customer_flag,
+    ga_sessions_date,
+    customer_id,
+    transaction_id,
+    nvl(transaction_revenue, 0) as transaction_revenue,
+    nvl(transaction_units, 0) as transaction_units,
+    event_label,
+    event_action,
+    event_category,
+    type,
+    ecommerce_action_type,
+    list_category,
+    page_path,
+    authentication_state,
+    is_exit,
+    page_title,
+    convert_timezone('UTC', 'America/New_York', hit_timestamp) AS timestamp,
+    case
+        when hit_custom_attributes:personalization_id_Anon is null
+        or hit_custom_attributes:personalization_id_Anon = '' then personalized_hit_id
+        else hit_custom_attributes:personalization_id_Anon
+    end as exp_user_id
+FROM ga.ga_sessions_hits 
+WHERE 
+ga_sessions_date between '2023-08-17' and '2023-08-21'
+AND dataset='web'
+AND NOT is_bot
+and load_type = 'daily'
+;
+
+
+-- Capture activity after authenticate page.
+-- get the activation hit and time
+create
+    or replace local temp table ecom_sandbox.sfw_r5_activation_sessions as
+select
+    *
+from
+    (
+        select
+            exp_user_id,
+            unique_visit_id,
+            hit_timestamp,
+            row_number() over(
+                partition by unique_visit_id
+                order by
+                    hit_timestamp
+            ) as rank
+        from
+            ecom_sandbox.sfw_r5_sessions_pre
+        where
+            ((event_category ='authenticate' AND event_action IN ('sign-in','create-account','forgot-password')) OR (event_category='complete-reset-pw' AND event_action='complete'))--set activation point as auth page
+    )
+where
+    rank = 1; -- setting variation as the variation of first authenticate page view of each sessions
+    
+
+-- get all events after activation 
+create or replace local temp table ecom_sandbox.sfw_r5_sessions as
+select
+    a.*,
+    b.hit_timestamp as activation_time
+from
+    ecom_sandbox.sfw_r5_sessions_pre as a
+    inner join ecom_sandbox.sfw_r5_activation_sessions as b on a.unique_visit_id = b.unique_visit_id;
+   and timediff(
+        millisecond,
+        a.hit_timestamp,
+        b.hit_timestamp
+    ) < 1000;
+
+--Separate Legacy, R5, Spillover based on app_version and login_page
+CREATE OR REPLACE LOCAL TEMP TABLE ecom_sandbox.sfw_r5_sessions_final ON COMMIT PRESERVE ROWS AS
+WITH VARIATION1 as 
+(select *,
+       case when app_version = 'SNAPSHOT' AND ((event_category ='authenticate' AND event_action IN ('sign-in','create-account','forgot-password') AND event_label IN ('view','click','submit')) OR (event_category='complete-reset-pw' AND event_action='complete')) then 'Legacy'
+            when app_version like 'R5-SPA%' AND ((event_category ='authenticate' AND event_action IN ('sign-in','create-account','forgot-password') AND event_label IN ('view','click','submit')) OR (event_category='complete-reset-pw' AND event_action='complete')) then 'R5' 
+            when login_page='legacy' AND (event_category='authenticate' AND event_action in ('sign-in','create-account') AND event_label = 'success') then 'Legacy'
+            when login_page='spa' AND (event_category='authenticate' AND event_action in ('sign-in','create-account') AND event_label = 'success') then 'R5'end as var
+from ecom_sandbox.sfw_r5_sessions),
+
+variation2 as (
+SELECT exp_user_id,
+       CASE
+           WHEN COUNT(distinct var) > 1 THEN 'Overlap'
+           WHEN COUNT(distinct var) = 1 THEN MAX(var) END AS Variation
+FROM VARIATION1
+GROUP BY 1)
+
+select a.*,  
+       b.Variation
+from ecom_sandbox.sfw_r5_sessions a
+LEFT JOIN variation2 b
+ON a.exp_user_id=b.exp_user_id;
+
+-- Get atc didn't success sessions (atc_success_rate)
+CREATE OR REPLACE LOCAL TEMP TABLE ecom_sandbox.atc_without_checkout_sessions ON COMMIT PRESERVE ROWS AS
+SELECT DISTINCT a.unique_visit_id
+FROM 
+(SELECT DISTINCT unique_visit_id
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE event_category = 'eec' AND event_action = 'addToCart') a
+LEFT JOIN 
+(SELECT DISTINCT unique_visit_id
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE event_category = 'eec' AND event_action = 'checkout' AND event_label = 'checkout') b
+ON a.unique_visit_id=b.unique_visit_id 
+WHERE b.unique_visit_id IS NULL;
+
+select variation, count(distinct unique_visit_id)
+from ecom_sandbox.sfw_r5_sessions_final
+WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.atc_without_checkout_sessions) 
+group by 1;
+
+-- From atc failures, get pw reset request page view
+SELECT variation, COUNT(DISTINCT unique_visit_id)
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.atc_without_checkout_sessions) 
+AND event_category='authenticate' AND event_action='forgot-password' AND event_label = 'view'
+GROUP BY 1;
+
+--sample sessions
+SELECT DISTINCT unique_visit_id
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.atc_without_checkout_sessions) 
+AND event_category='authenticate' AND event_action='forgot-password' AND event_label = 'view'
+limit 10;
+
+select * from ecom_sandbox.sfw_r5_sessions_final
+where unique_visit_id='2023081800000029282292171454404421692387513'
+order by hit_number;
+
+-- From atc failures, get pw reset request page clicks
+SELECT variation, COUNT(DISTINCT unique_visit_id)
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.atc_without_checkout_sessions) 
+AND event_category='authenticate' AND event_action='forgot-password' AND event_label = 'submit'
+GROUP BY 1;
+
+-- Get checkout without purchase sessions (cart abandon rate)
+CREATE OR REPLACE LOCAL TEMP TABLE ecom_sandbox.checkout_without_purchase_sessions ON COMMIT PRESERVE ROWS AS
+SELECT DISTINCT a.unique_visit_id
+FROM 
+(SELECT DISTINCT unique_visit_id
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE event_category = 'eec' AND event_action = 'checkout' AND event_label = 'checkout') a
+LEFT JOIN 
+(SELECT DISTINCT unique_visit_id
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE event_action='purchase' and event_category='eec' and transaction_id IS NOT NULL) b
+ON a.unique_visit_id=b.unique_visit_id 
+WHERE b.unique_visit_id IS NULL;
+
+select variation, count(distinct unique_visit_id)
+from ecom_sandbox.sfw_r5_sessions_final
+WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.checkout_without_purchase_sessions) 
+group by 1;
+
+-- From checkout failures, get pw reset request page view
+SELECT variation, COUNT(DISTINCT unique_visit_id)
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.checkout_without_purchase_sessions) 
+AND event_category='authenticate' AND event_action='forgot-password' AND event_label = 'view'
+GROUP BY 1;
+
+-- From checkout failures, get pw reset request page clicks
+SELECT variation, COUNT(DISTINCT unique_visit_id)
+FROM ecom_sandbox.sfw_r5_sessions_final
+WHERE unique_visit_id in (SELECT unique_visit_id FROM ecom_sandbox.checkout_without_purchase_sessions) 
+AND event_category='authenticate' AND event_action='forgot-password' AND event_label = 'submit'
+GROUP BY 1;
