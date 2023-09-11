@@ -1,4 +1,30 @@
-set (start_date, op_date)  = (CURRENT_DATE() -1, (select max(session_date) from ecom_sandbox.R5_EXP_NMA));
+set (start_date, op_date)  = (CURRENT_DATE() -1, (select max(session_date) from ecom_sandbox.R5_EXP_NMA_ZS_NEW));
+
+----------------------------------------------------------------------------------
+-- getting nma_linker_id in the experiment
+----------------------------------------------------------------------------------
+create or replace local temp table ecom_sandbox.tmp_r5_nma_linker_id as
+select distinct nma_linker_id
+from segment.segment_nma_hits
+        where convert_timezone('UTC', 'America/New_York', event_timestamp)::date > $op_date and convert_timezone('UTC', 'America/New_York', event_timestamp)::date <= $start_date
+        and session_traits:experiments:auth_r5_enabled::string in ('on', 'off')
+        and dataset in ('android', 'ios')
+        and session_id IS NOT NULL
+        ;
+
+select * from ecom_sandbox.tmp_r5_nma_linker_id;
+
+----------------------------------------------------------------------------------
+-- getting nma_linker_id in the R5
+----------------------------------------------------------------------------------
+create or replace local temp table ecom_sandbox.tmp_r5_nma_linker_id_r5 as
+select distinct nma_linker_id
+from segment.segment_nma_hits
+        where convert_timezone('UTC', 'America/New_York', event_timestamp)::date > $op_date and convert_timezone('UTC', 'America/New_York', event_timestamp)::date <= $start_date
+        and session_traits:experiments:auth_r5_enabled::string in ('on')
+        and dataset in ('android', 'ios')
+        and session_id IS NOT NULL
+        ;
 
 ----------------------------------------------------------------------------------
 -- getting native event data first
@@ -9,17 +35,15 @@ select
     convert_timezone('UTC', 'America/New_York', session_start_timestamp)::date as session_date,
     session_id nma_session_id,
     null hybrid_session_id,
-    first_value(anonymous_id) ignore nulls over (partition BY session_id ORDER BY  event_timestamp) anonymous_id,
-    first_value(customer_id) ignore nulls over (partition BY session_id ORDER BY event_timestamp) customer_id,
+    null web_session_id,
     dataset,
-    dataset as device_category,
     new_customer_flag,
     channel,
     authentication_state,
     event_timestamp,
     event_id,
     event_name,
-    event_category,
+    properties:event_category::string as event_category,
     properties:event_action::string as event_action,
     EVENT_ACTION as action_name,
     event_label,
@@ -27,21 +51,23 @@ select
     null as order_id,
     null as revenue_amount,
     null as transaction_units,
-    is_exit,
-    screen_name
-    ,case 
-        when session_traits:experiments:android.auth.r5.enabled::string = 'on' then 'R5' 
-        when session_traits:experiments:ios.auth.r5.enabled::string = 'on' then 'R5'
-        when session_traits:experiments:android.auth.r5.enabled::string = 'off' then 'LEGACY' 
-        when session_traits:experiments:ios.auth.r5.enabled::string = 'off' then 'LEGACY' 
-       end as Variation
+    screen_name,
+    case 
+        when session_traits:experiments:auth_r5_enabled::string = 'on' then 'R5' 
+        when session_traits:experiments:auth_r5_enabled::string = 'off' then 'LEGACY' 
+       end as Variation,
+    app_version,
+    properties:page_type::string as page_type,
+    case when dataset ilike '%android%' then 'false' 
+         when dataset ilike '%ios%' then properties:auto_login::string 
+        end as auto_login
 from
     segment.segment_nma_hits
 where
-    session_date > $op_date and session_date <= $datadate
+    session_date > $op_date and session_date <= $start_date 
     and dataset in ('android', 'ios')
-    and not (event_name in ('Order Completed', 'Checkout Started')) -- to not conflict with hybrid events
-    and (session_traits:experiments:android.auth.r5.enabled::string in ('on', 'off') or session_traits:experiments:ios.auth.r5.enabled::string in ('on', 'off'))
+    and (event_name is null or event_name not in ('Order Completed', 'Checkout Started')) -- to not conflict with hybrid events
+    and session_traits:experiments:auth_r5_enabled::string in ('on', 'off')
 
 union all
 
@@ -53,10 +79,8 @@ select
     convert_timezone('UTC', 'America/New_York', session_start_timestamp)::date as session_date,
     null as nma_session_id,
     session_id as hybrid_session_id,
-    null as anonymous_id,
-    null as customer_id, --case when length(customer_id) > 0 then customer_id else NULL end as customer_id,
+    null as web_session_id,
     case when dataset ilike '%android%' then 'android' else 'ios' end as dataset,
-    case when dataset ilike '%android%' then 'android' else 'ios' end as device_category,
     null as new_customer_flag,
     null as channel,
     properties:authentication_state::string as authentication_state,
@@ -71,30 +95,29 @@ select
     order_id,
     null revenue_amount,
     null transaction_units,
-    properties:is_exit::string as is_exit,
-    properties:screen_name::string as screen_name
-    ,case 
-        when session_traits:experiments:android.auth.r5.enabled::string = 'on' then 'R5' 
-        when session_traits:experiments:ios.auth.r5.enabled::string = 'on' then 'R5'
-        when session_traits:experiments:android.auth.r5.enabled::string = 'off' then 'LEGACY' 
-        when session_traits:experiments:ios.auth.r5.enabled::string = 'off' then 'LEGACY' 
-       end as Variation
+    properties:screen_name::string as screen_name,
+    null as Variation,
+    properties:app_version::string as app_version, 
+    properties:page_type::string as page_type,
+    null auto_login
 FROM
     segment.segment_hits_hybrid
 WHERE
-    session_date > $op_date and session_date <= $datadate
-    and (
-          (event_category = 'eec' and event_action = 'checkout' and event_label='checkout') or
-          (event_action = 'purchase' and order_id is not null)
-      )
-    and (session_traits:experiments:android.auth.r5.enabled::string in ('on', 'off') or session_traits:experiments:ios.auth.r5.enabled::string in ('on', 'off'))
+    session_date > $op_date and session_date <= $start_date --current_date-1
+  and (
+        (event_category = 'checkout' and event_action = 'customer-state') or
+        (event_action = 'purchase' and order_id is not null)
+    )
+    and nma_linker_id in 
+        (select distinct nma_linker_id
+        from ecom_sandbox.tmp_r5_nma_linker_id
+        )
 ;
-
 
 ----------------------------------------------------------------------------------
 -- fill in session id and other metrics
 ----------------------------------------------------------------------------------
-CREATE OR REPLACE local temp TABLE ecom_sandbox.NMA_R5_SESSIONS AS
+CREATE OR REPLACE local temp TABLE ecom_sandbox.NMA_R5_SESSIONS_PRE AS
 with tmp as (
     select
         coalesce(
@@ -105,6 +128,7 @@ with tmp as (
          ,*
     from
         ecom_sandbox.tmp_segment_sessions_events_auth
+    where nma_linker_id is not null
     order by
         event_timestamp
 )
@@ -113,10 +137,7 @@ select distinct
     session_date,
     -- session_id,
     derived_session_id session_id,
-    first_value(anonymous_id) ignore nulls over(partition by derived_session_id order by event_timestamp) as anonymous_id,
-    first_value(customer_id) ignore nulls over(partition by derived_session_id order by event_timestamp) as customer_id,
-    first_value(dataset) ignore nulls over(partition by derived_session_id order by event_timestamp) as dataset ,
-    first_value(device_category) ignore nulls over(partition by derived_session_id order by event_timestamp) as device_category,
+    first_value(dataset) ignore nulls over(partition by derived_session_id order by event_timestamp) as dataset,
     first_value(new_customer_flag) ignore nulls over(partition by derived_session_id order by event_timestamp)  as new_customer_flag,
     first_value(channel) ignore nulls over(partition by derived_session_id order by event_timestamp) as channel,
     authentication_state,
@@ -131,57 +152,86 @@ select distinct
     order_id,
     revenue_amount,
     transaction_units,
-    is_exit,
-    screen_name
-    ,variation
+    screen_name,
+    first_value(variation) ignore nulls over(partition by derived_session_id order by event_timestamp) variation,
+    first_value(app_version) ignore nulls over(partition by derived_session_id order by event_timestamp) app_version,
+    page_type,
+    auto_login
 from
     tmp;
-
-/*Experiment activation point can't be added since the page viewed events of auth pages are missing. For each nma linker id that activated into the experiment, all events will be included in this analysis.
+    
 ----------------------------------------------------------------------------------
--- Experiment activation
+----------------Orders Data
 ----------------------------------------------------------------------------------
-CREATE OR REPLACE local temp TABLE ecom_sandbox.activation_sessions AS
-select
-    *
-from
-    (
-        select
-            nma_linker_id,
-            session_id,
-            event_timestamp,
-            row_number() over(
-                partition by session_id
-                order by
-                    event_timestamp
-            ) as rank
+create or replace local temp table ecom_sandbox.tmp_segment_sessions_orders_auth as (
+    with t1 as (
+        select distinct
+            session_id, ORDER_PLACED_DTTM,
+            ol.order_id as order_id
         from
-            ecom_sandbox.tmp_segment_total_sessions_events_auth
-        where
-            screen_name IN ('login', 'register', 'reset-password') AND event_name = 'Screen Viewed' -- set activation point as sign-in, create-account or password reset request page impression. Need to revisit after experiment set up
+            ecom_sandbox.nma_r5_sessions_pre a 
+        inner join ecom.order_line ol on a.order_id = ol.order_id
+        where a.order_id is not null
     )
-where
-    rank = 1; --activation point for each nma_linker_id and each session, need to revisit the details after experiment set up
 
--- get all events after activation 
+       ,t3 as (
+        select o.order_id as be_order_id, 
+               sum(olm.ORDER_LINE_QUANTITY) as NMA_Units,
+               sum(olm.order_line_total_price) Total_Revenue
+        from
+            ecom.orders o
+                inner join
+            ecom.order_line olm on o.order_id = olm.order_id
+        group by 1
+    )
+
+       ,t4 as(
+        select distinct
+            t1.*,
+            t3.*
+        FROM
+            t1
+                left join
+            t3 on t1.order_id = t3.be_order_id
+    )
+
+    select
+        session_id as order_session_id, ORDER_PLACED_DTTM,
+        sum(
+                CASE
+                    WHEN order_id IS NOT NULL
+                        THEN NMA_Units
+                    END)order_units,
+        SUM(
+                CASE
+                    WHEN order_id IS NOT NULL
+                        THEN Total_Revenue
+                    ELSE 0
+                    END) AS order_total_sales
+    from
+        t4
+    group by
+        1,2
+);
+
+
+-- aggregate on the sessions level    
 create or replace local temp table ecom_sandbox.nma_r5_sessions as
-select
+select 
     a.*,
-    b.event_timestamp as activation_time
-from
-    ecom_sandbox.tmp_segment_total_sessions_events_auth as a
-    inner join ecom_sandbox.activation_sessions b 
-on a.nma_linker_id = b.nma_linker_id and a.session_id=b.session_id -- Need to revisit after experiment set up
-    and timediff(
-        millisecond,
-        a.event_timestamp,
-        b.event_timestamp
-    ) < 1000; -- 1 second rule to address the race condtition */
+    COALESCE(order_units,0) order_units,
+    COALESCE(order_total_sales,0) order_total_sales
+from ecom_sandbox.nma_r5_sessions_pre as a 
+left join ecom_sandbox.tmp_segment_sessions_orders_auth as b
+on a.session_id = b.order_session_id 
+;
+
 
 ----------------------------------------------------------------------------------
 -- Funnel Analysis
 ----------------------------------------------------------------------------------
 --Success hit source table with match recognize function
+            
 CREATE OR REPLACE local temp TABLE ecom_sandbox.tmp_success_hits_src_v1 AS
 SELECT
     *
@@ -195,24 +245,22 @@ FROM
                     FROM
                         ecom_sandbox.nma_r5_sessions
                     WHERE
-                        ( 
-                            event_name = 'Product Added'
-                            AND (not coalesce(event_label, '') ilike '%addtoautoship%')
-                            and (not coalesce(event_action, '') ilike '%addtoautoship%')
-                        ) 	
-                        or (event_category = 'eec' and event_action = 'checkout' and event_label='checkout')
+                        (event_name = 'Product Added'
+                            AND (properties:event_label is null or (properties:event_label is not null and properties:event_label not ilike '%addtoautoship%'))
+                            AND (coalesce(properties:event_action::string, '') not ilike '%addtoautoship%')
+                            ) 	or (event_category = 'checkout' and event_action = 'customer-state')
                 )
         SELECT
             'atc_success_hits' success_hits,
             session_id,
             match_number
         FROM
-            atc_success_hits match_recognize( partition BY session_id 
-                                             ORDER BY event_timestamp measures match_number() 
-                                             AS match_number one row per MATCH pattern (atc_hit checkout_hit) define atc_hit   AS  event_name = 'Product Added'
-                                             AND (not coalesce(event_label, '') ilike '%addtoautoship%')
-                                             and (not coalesce(event_action, '') ilike '%addtoautoship%'),
-                                             checkout_hit AS event_category = 'eec' and event_action = 'checkout' and event_label='checkout' )
+            atc_success_hits match_recognize( partition BY session_id ORDER BY
+        event_timestamp measures match_number() AS match_number one row per MATCH pattern
+        (atc_hit checkout_hit) define atc_hit   AS event_name = 'Product Added'
+        AND (properties:event_label is null or (properties:event_label is not null and properties:event_label not ilike '%addtoautoship%'))
+        AND (coalesce(properties:event_action::string, '') not ilike '%addtoautoship%'),
+                                              checkout_hit AS event_category = 'checkout' and event_action = 'customer-state' )
         ORDER BY
             match_number );
             
@@ -262,10 +310,11 @@ CREATE OR REPLACE local temp TABLE ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_SESSIONS AS
 SELECT
   VARIATION
 , SESSION_DATE
-, DEVICE_CATEGORY
+, a.SESSION_ID
 , DATASET
 , CHANNEL
 , NEW_CUSTOMER_FLAG
+, APP_VERSION
 , COUNT(DISTINCT a.SESSION_ID) AS TOTAL_SESSIONS
 , COUNT(DISTINCT 
     CASE
@@ -280,7 +329,26 @@ SELECT
               WHEN coalesce(sh.atc_success_session, 0) = 'True'
               THEN a.SESSION_ID
               END) ATC_SUCCESS_SESSIONS
--- SIGN-IN METRICS
+, COUNT(DISTINCT 
+    CASE
+    WHEN event_category = 'checkout' and event_action = 'customer-state'
+    THEN a.SESSION_ID
+    END
+  ) AS CHECKOUT_SESSIONS
+, COUNT(DISTINCT
+    CASE
+    WHEN EVENT_ACTION in ('purchase')
+    AND order_id IS NOT NULL
+    THEN a.SESSION_ID
+    END) AS PURCHASE_SESSIONS
+, COUNT(DISTINCT
+    CASE
+    WHEN EVENT_ACTION in ('purchase')
+    AND order_id IS NOT NULL
+    THEN ORDER_ID
+    END) AS ORDERS
+, SUM(CASE WHEN EVENT_ACTION in ('purchase') AND order_id IS NOT NULL THEN order_units END) TRANSACTION_QUANTITY
+, SUM(CASE WHEN EVENT_ACTION in ('purchase') AND order_id IS NOT NULL THEN order_total_sales END) TRANSACTION_REVENUE 
 , COUNT(DISTINCT
     CASE
     WHEN AUTHENTICATION_STATE IN ('authenticated', 'fully-authenticated')
@@ -289,76 +357,175 @@ SELECT
   ) AS AUTHENTICATED_SESSIONS
 , COUNT(DISTINCT
     CASE
-    WHEN EVENT_NAME = 'Navigation Clicked'
-    AND EVENT_CATEGORY = 'auth-nav'
-    AND EVENT_ACTION = 'Login'
+    WHEN EVENT_NAME = 'Screen Viewed'
+    AND SCREEN_NAME in ('login','sign-in')
+    AND PAGE_TYPE = 'login'
+    AND VARIATION = 'LEGACY'
     THEN a.SESSION_ID
     END
-  ) AS SIGN_IN_CLICKS_SESSIONS 
+  ) AS SIGN_IN_PAGE_IMPRESSION_SESSIONS
 , COUNT(DISTINCT
     CASE
-    WHEN EVENT_NAME = 'Login Completed'
+    WHEN EVENT_NAME = 'Screen Viewed'
+    AND SCREEN_NAME = 'register'
+    AND PAGE_TYPE = 'login'
+    AND VARIATION = 'LEGACY'
     THEN a.SESSION_ID
     END
-  ) AS SIGN_IN_SUCCESS_SESSIONS
-
--- REGISTRATION METRICS 
+  ) AS CREATE_ACCOUNT_PAGE_IMPRESSION_SESSIONS
 , COUNT(DISTINCT
     CASE
-    WHEN EVENT_NAME = 'Navigation Clicked'
-    AND EVENT_CATEGORY = 'auth-nav'
-    AND EVENT_ACTION = 'Create Account'
+    WHEN EVENT_NAME = 'Screen Viewed'
+    AND SCREEN_NAME IN ('register','login','sign-in')
+    AND PAGE_TYPE = 'login'
+    AND VARIATION = 'LEGACY'
     THEN a.SESSION_ID
     END
-  ) AS REGISTRATION_CLICKS_SESSIONS 
+  ) AS AUTH_PAGE_IMPRESSION_SESSIONS
+, COUNT(DISTINCT 
+    CASE WHEN (EVENT_NAME = 'Login Completed' AND auto_login='false') OR EVENT_NAME IN ('Create Account Completed')
+    THEN a.SESSION_ID
+    END
+  ) AS AUTH_SUCCESS_SESSIONS
+, COUNT(DISTINCT 
+    CASE WHEN (EVENT_NAME = 'Login Completed' AND auto_login='false') OR EVENT_NAME IN ('Create Account Completed')
+    THEN a.EVENT_ID
+    END
+  ) AS AUTH_SUCCESS_EVENTS
 , COUNT(DISTINCT
     CASE
-    WHEN EVENT_NAME IN ('Create Account Completed')
+    WHEN EVENT_NAME = 'Navigation Clicked' AND event_category = 'auth-nav'AND event_action IN ('Create Account','Login')
     THEN a.SESSION_ID
     END
-  ) AS REGISTRATION_SUCCESS_SESSIONS 
-
+  ) AS AUTH_CLICKS_SESSIONS 
+, COUNT(DISTINCT
+    CASE
+    WHEN EVENT_NAME = 'Screen Viewed'
+    AND SCREEN_NAME IN ('register','login','sign-in')
+    AND PAGE_TYPE = 'login'
+    AND VARIATION = 'LEGACY'
+    THEN a.EVENT_ID
+    END
+  ) AS AUTH_PAGE_IMPRESSION_EVENTS
 FROM ecom_sandbox.nma_r5_sessions a
 LEFT JOIN
     ecom_sandbox.tmp_success_hits_final_v1 sh 
         ON a.session_id = sh.session_id
-GROUP BY 1,2,3,4,5,6
-ORDER BY 1,2,3,4,5,6 asc
+GROUP BY 1,2,3,4,5,6,7
+ORDER BY 1,2,3,4,5,6,7 asc
 );
 
-SELECT * FROM ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_SESSIONS;
---------------------------------------------------------------------------------------------------------------------------------------------
 
+SELECT session_date, SUM(ATC_SUCCESS_SESSIONS) FROM ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_SESSIONS group by 1;
 
---INSERT INTO ECOM_SANDBOX.sfw_R5_GA
+----------------------------------------------------------------------------------
+-- getting R5 sign-in and create-account impression data
+----------------------------------------------------------------------------------
+CREATE OR REPLACE local temp TABLE ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_SESSIONS_R5 AS (
+select
+    'R5' as Variation,
+    convert_timezone('UTC', 'America/New_York', session_start_timestamp)::date as session_date,
+    properties:mobile_app_properties:nma_platform::string as dataset,
+    new_customer_flag,
+    properties:mobile_app_properties:nma_version::string as app_version, 
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('sign-in')
+    THEN SESSION_ID END) AS SIGN_IN_PAGE_IMPRESSION_SESSIONS,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('create-account')
+    THEN SESSION_ID END) AS CREATE_ACCOUNT_PAGE_IMPRESSION_SESSIONS,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('create-account','sign-in')
+    THEN SESSION_ID END) AS AUTH_PAGE_IMPRESSION_SESSIONS,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('create-account','sign-in')
+    THEN EVENT_ID END) AS AUTH_PAGE_IMPRESSION_EVENTS
+FROM
+    segment.segment_hits
+WHERE
+    session_date >$op_date and session_date <= $start_date
+    and (event_Category = 'authenticate' and event_Label = 'view' and event_Action IN ('sign-in','create-account') and properties:mobile_app_properties:nma_platform::string in ('ios','android'))
+    and properties:nma_linker_id::string in 
+        (select distinct nma_linker_id 
+        from ecom_sandbox.tmp_r5_nma_linker_id_r5
+        )
+GROUP BY 1,2,3,4,5
+)
+;
+
 CREATE OR REPLACE local temp TABLE ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_I AS (
 SELECT
-      VARIATION
-    , SESSION_DATE
-    , DEVICE_CATEGORY
-    , DATASET
-    , CHANNEL
-    , NEW_CUSTOMER_FLAG
+      a.VARIATION
+    , a.SESSION_DATE
+    , a.DATASET
+    , a.CHANNEL
+    , a.NEW_CUSTOMER_FLAG
+    , a.APP_VERSION
     , SUM(TOTAL_SESSIONS) AS TOTAL_SESSIONS
     , SUM(ATC_SESSIONS) AS ATC_SESSIONS
     , SUM(ATC_SUCCESS_SESSIONS) AS ATC_SUCCESS_SESSIONS
--- SIGN-IN METRICS
+    , SUM(CHECKOUT_SESSIONS) AS CHECKOUT_SESSIONS
+    , SUM(PURCHASE_SESSIONS) AS PURCHASE_SESSIONS
+    , SUM(ORDERS) AS ORDERS
+    , SUM(TRANSACTION_QUANTITY) AS TRANSACTION_QUANTITY
+    , SUM(TRANSACTION_REVENUE) AS TRANSACTION_REVENUE
     , SUM(AUTHENTICATED_SESSIONS) AS AUTHENTICATED_SESSIONS
-    , SUM(SIGN_IN_CLICKS_SESSIONS) AS SIGN_IN_CLICKS_SESSIONS
-    , SUM(SIGN_IN_SUCCESS_SESSIONS) AS SIGN_IN_SUCCESS_SESSIONS
--- REGISTRATION METRICS
-    , SUM(REGISTRATION_CLICKS_SESSIONS) AS REGISTRATION_CLICKS_SESSIONS
-    , SUM(REGISTRATION_SUCCESS_SESSIONS) AS REGISTRATION_SUCCESS_SESSIONS
+    , SUM(SIGN_IN_PAGE_IMPRESSION_SESSIONS) AS SIGN_IN_PAGE_IMPRESSION_SESSIONS
+    , SUM(CREATE_ACCOUNT_PAGE_IMPRESSION_SESSIONS) AS CREATE_ACCOUNT_PAGE_IMPRESSION_SESSIONS
+    , SUM(AUTH_PAGE_IMPRESSION_SESSIONS) AS AUTH_PAGE_IMPRESSION_SESSIONS
+    , SUM(AUTH_SUCCESS_SESSIONS) AS AUTH_SUCCESS_SESSIONS
+    , SUM(AUTH_SUCCESS_EVENTS) AS AUTH_SUCCESS_EVENTS
+    , SUM(AUTH_CLICKS_SESSIONS) AS AUTH_CLICKS_SESSIONS 
+    , SUM(AUTH_PAGE_IMPRESSION_EVENTS) AS AUTH_PAGE_IMPRESSION_EVENTS
 FROM
-  ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_SESSIONS 
+  ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_SESSIONS a
   GROUP BY 1,2,3,4,5,6
   ORDER BY 1,2,3,4,5,6 asc
 );
 
-SELECT * FROM ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_I;
+CREATE OR REPLACE local temp TABLE ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_JOINED AS 
+SELECT
+    i.VARIATION,
+    i.SESSION_DATE,
+    i.DATASET,
+    i.NEW_CUSTOMER_FLAG,
+    i.APP_VERSION,
+    i.TOTAL_SESSIONS,
+    i.ATC_SESSIONS,
+    i.ATC_SUCCESS_SESSIONS,
+    i.CHECKOUT_SESSIONS,
+    i.PURCHASE_SESSIONS,
+    i.ORDERS,
+    i.TRANSACTION_QUANTITY,
+    i.TRANSACTION_REVENUE,
+    i.AUTHENTICATED_SESSIONS,
+    i.AUTH_SUCCESS_SESSIONS,
+    i.AUTH_SUCCESS_EVENTS,
+    i.AUTH_CLICKS_SESSIONS,
+    CASE WHEN i.VARIATION = 'LEGACY' THEN i.SIGN_IN_PAGE_IMPRESSION_SESSIONS ELSE r5.SIGN_IN_PAGE_IMPRESSION_SESSIONS END AS SIGN_IN_PAGE_IMPRESSION_SESSIONS,
+    CASE WHEN i.VARIATION = 'LEGACY' THEN i.CREATE_ACCOUNT_PAGE_IMPRESSION_SESSIONS ELSE r5.CREATE_ACCOUNT_PAGE_IMPRESSION_SESSIONS END AS CREATE_ACCOUNT_PAGE_IMPRESSION_SESSIONS,
+    CASE WHEN i.VARIATION = 'LEGACY' THEN i.AUTH_PAGE_IMPRESSION_SESSIONS ELSE r5.AUTH_PAGE_IMPRESSION_SESSIONS END AS AUTH_PAGE_IMPRESSION_SESSIONS,
+    CASE WHEN i.VARIATION = 'LEGACY' THEN i.AUTH_PAGE_IMPRESSION_SESSIONS ELSE r5.AUTH_PAGE_IMPRESSION_EVENTS END AS AUTH_PAGE_IMPRESSION_EVENTS
+FROM ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_I i
+LEFT JOIN ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_SESSIONS_R5 r5 
+ON i.VARIATION = r5.VARIATION
+AND i.SESSION_DATE = r5.SESSION_DATE
+AND i.DATASET = r5.DATASET
+AND i.NEW_CUSTOMER_FLAG = r5.NEW_CUSTOMER_FLAG
+AND i.APP_VERSION = r5.APP_VERSION
 
-INSERT INTO ecom_sandbox.R5_EXP_NMA
---CREATE OR REPLACE TABLE ecom_sandbox.R5_EXP_NMA AS
-select * from ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_I;
+WHERE i.VARIATION IN ('LEGACY', 'R5')
+
+ORDER BY i.VARIATION, i.SESSION_DATE, i.DATASET, i.NEW_CUSTOMER_FLAG, i.APP_VERSION;
+
+--select distinct session_date from ecom_sandbox.R5_EXP_NMA_ZS_NEW;
+--select distinct session_date from ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_JOINED;
+
+INSERT INTO ecom_sandbox.R5_EXP_NMA_ZS_NEW 
+select * from ECOM_SANDBOX.TMP_SEGMENT_NMA_AUTH_JOINED;
 
 commit;
