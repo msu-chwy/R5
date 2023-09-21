@@ -1,0 +1,180 @@
+----------------------------------------------------------------------------------
+-- getting sign-in and create-account view per sessions
+----------------------------------------------------------------------------------
+select
+    case when properties:mobile_app_properties:nma_platform::string is not null then properties:mobile_app_properties:nma_platform::string
+         when properties:mobile_app_properties:nma_platform::string is null and device_category='desktop' then 'dweb'
+         when properties:mobile_app_properties:nma_platform::string is null and device_category='mobile' then 'mweb'
+    end as dataset,
+    COUNT(DISTINCT SESSION_ID) AS SESSIONS,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('sign-in')
+    THEN EVENT_ID END)/COUNT(DISTINCT SESSION_ID) AS SIGN_IN_VIEW_PER_SESSION,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('create-account')
+    THEN EVENT_ID END)/COUNT(DISTINCT SESSION_ID) AS CREATE_ACCOUNT_VIEW_PER_SESSION,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('create-account','sign-in')
+    THEN EVENT_ID END)/COUNT(DISTINCT SESSION_ID) AS AUTH_VIEW_PER_SESSION
+FROM
+    segment.segment_hits
+WHERE
+    convert_timezone('UTC', 'America/New_York', session_start_timestamp)::date ='2023-09-06'
+    and event_Category = 'authenticate' and event_Label = 'view' and event_Action IN ('sign-in','create-account')
+GROUP BY 1
+;
+
+
+----------------------------------------------------------------------------------
+-- getting nma_linker_id in the R5
+----------------------------------------------------------------------------------
+create or replace local temp table ecom_sandbox.tmp_r5_nma_linker_id_r5 as
+select distinct nma_linker_id
+from segment.segment_nma_hits
+        where convert_timezone('UTC', 'America/New_York', event_timestamp)::date = '2023-09-06'
+        and session_traits:experiments:auth_r5_enabled::string in ('on')
+        and dataset in ('android', 'ios')
+        and session_id IS NOT NULL
+;
+
+
+select case 
+        when session_traits:experiments:auth_r5_enabled::string = 'on' then 'R5' 
+        when session_traits:experiments:auth_r5_enabled::string = 'off' then 'LEGACY' 
+       end as Variation, count(distinct session_id)
+from segment.segment_nma_hits
+        where convert_timezone('UTC', 'America/New_York', event_timestamp)::date >= '2023-08-08'
+        and session_traits:experiments:auth_r5_enabled::string in ('on','off')
+        and dataset in ('android', 'ios')
+group by 1
+;
+----------------------------------------------------------------------------------
+-- getting R5 sign-in and create-account impression data
+----------------------------------------------------------------------------------
+select
+    properties:mobile_app_properties:nma_platform::string as dataset,
+    properties:mobile_app_properties:nma_version::string as app_version, 
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('sign-in')
+THEN SESSION_ID END) AS SIGN_IN_PAGE_VIEW_SESSION,
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('sign-in')
+THEN EVENT_ID END) AS SIGN_IN_PAGE_VIEW_EVENTS,
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('create-account')
+THEN SESSION_ID END) AS CREATE_ACCOUNT_PAGE_VIEW_SESSION,
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('create-account')
+THEN EVENT_ID END) AS CREATE_ACCOUNT_PAGE_VIEW_EVENTS,
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('submit') 
+    and event_Action IN ('sign-in')
+THEN SESSION_ID END) AS SIGN_IN_SUBMIT_SESSION,
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('submit') 
+    and event_Action IN ('sign-in')
+THEN EVENT_ID END) AS SIGN_IN_SUBMIT_EVENTS,
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('submit') 
+    and event_Action IN ('create-account')
+THEN SESSION_ID END) AS CREATE_ACCOUNT_SUBMIT_SESSION,    
+COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('submit') 
+    and event_Action IN ('create-account')
+THEN EVENT_ID END) AS CREATE_ACCOUNT_SUBMIT_EVENTS
+FROM
+    segment.segment_hits
+WHERE
+    convert_timezone('UTC', 'America/New_York', event_timestamp)::date = '2023-09-06'
+    and (event_Category = 'authenticate' and event_Label in ('view','submit') and event_Action IN ('sign-in','create-account') and properties:mobile_app_properties:nma_platform::string in ('ios','android'))
+    and properties:nma_linker_id::string in 
+        (select distinct nma_linker_id 
+        from ecom_sandbox.tmp_r5_nma_linker_id_r5
+        )
+GROUP BY 1,2
+;
+
+----------------------------------------------------------------------------------
+-- getting R5 sign-in and create-account CLICKS data
+----------------------------------------------------------------------------------
+select
+    dataset,
+    app_version, 
+COUNT(DISTINCT
+    CASE
+    WHEN (EVENT_NAME = 'Navigation Clicked' AND properties:event_category::string = 'auth-nav'AND properties:event_action::string = 'Login')
+    THEN SESSION_ID
+    END
+  ) AS SIGN_IN_NAVIGATION_CLICKS_SESSION
+,COUNT(DISTINCT
+    CASE
+    WHEN (EVENT_NAME = 'Navigation Clicked' AND properties:event_category::string = 'auth-nav'AND properties:event_action::string = 'Login')
+    THEN EVENT_ID
+    END
+  ) AS SIGN_IN_NAVIGATION_CLICKS_EVENTS
+, COUNT(DISTINCT
+    CASE
+    WHEN (EVENT_NAME = 'Navigation Clicked' AND properties:event_category::string = 'auth-nav'AND properties:event_action::string = 'Create Account')
+    THEN SESSION_ID
+    END
+  ) AS CREATE_ACCOUNT_NAVIGATION_CLICKS_SESSION
+, COUNT(DISTINCT
+    CASE
+    WHEN (EVENT_NAME = 'Navigation Clicked' AND properties:event_category::string = 'auth-nav'AND properties:event_action::string = 'Create Account')
+    THEN EVENT_ID
+    END
+  ) AS CREATE_ACCOUNT_NAVIGATION_CLICKS_EVENTS
+, COUNT(DISTINCT 
+    CASE WHEN (EVENT_NAME = 'Login Completed' AND dataset ilike '%ios%' AND properties:auto_login::string='false') OR (EVENT_NAME = 'Login Completed' AND dataset ilike '%android%') OR EVENT_NAME IN ('Create Account Completed')
+    THEN SESSION_ID
+    END
+  ) AS AUTH_SUCCESS_SESSIONS
+, COUNT(DISTINCT 
+    CASE WHEN (EVENT_NAME = 'Login Completed' AND dataset ilike '%ios%' AND properties:auto_login::string='false') OR (EVENT_NAME = 'Login Completed' AND dataset ilike '%android%') OR EVENT_NAME IN ('Create Account Completed')
+    THEN EVENT_ID
+    END
+  ) AS AUTH_SUCCESS_EVENTS
+FROM
+    segment.segment_nma_hits
+WHERE
+    convert_timezone('UTC', 'America/New_York', event_timestamp)::date = '2023-09-06'
+    and dataset in ('android', 'ios')
+    and nma_linker_id in 
+        (select distinct nma_linker_id 
+        from ecom_sandbox.tmp_r5_nma_linker_id_r5
+        )
+GROUP BY 1,2
+;
+
+----------------------------------------------------------------------------------
+-- getting recaptcha
+----------------------------------------------------------------------------------
+select
+    case when properties:mobile_app_properties:nma_platform::string is not null then properties:mobile_app_properties:nma_platform::string
+         when properties:mobile_app_properties:nma_platform::string is null and device_category='desktop' then 'dweb'
+         when properties:mobile_app_properties:nma_platform::string is null and device_category='mobile' then 'mweb'
+    end as dataset,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('view') 
+    and event_Action IN ('recaptcha')
+    and page_type ilike 'login'
+    THEN EVENT_ID END)/COUNT(DISTINCT SESSION_ID) AS ReCaptcha_VIEW_PER_SESSION,
+    COUNT(DISTINCT CASE WHEN event_Category = 'authenticate' 
+    and event_Label in ('check') 
+    and event_Action IN ('recaptcha')
+    and page_type ilike 'login'
+    THEN EVENT_ID END)/COUNT(DISTINCT SESSION_ID) AS ReCaptcha_Clicks_PER_SESSION
+FROM
+    segment.segment_hits
+WHERE
+    convert_timezone('UTC', 'America/New_York', session_start_timestamp)::date ='2023-09-05'
+    and event_Category = 'authenticate' and event_Label in ('view','check') and event_Action IN ('recaptcha') and page_type ilike 'login'
+GROUP BY 1
+;
